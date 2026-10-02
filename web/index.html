@@ -1,0 +1,130 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Longtail</title>
+<style>
+  body { font-family: system-ui, sans-serif; margin: 0; background: #0f172a; color: #e2e8f0; }
+  main { max-width: 1100px; margin: 0 auto; padding: 32px 20px; }
+  h1 { margin: 0 0 4px; }
+  .sub { color: #94a3b8; margin: 0 0 24px; }
+  form { display: flex; gap: 8px; }
+  input { flex: 1; padding: 10px 12px; font-size: 16px; border-radius: 6px; border: 1px solid #334155;
+          background: #1e293b; color: #e2e8f0; }
+  button { padding: 10px 20px; font-size: 16px; border: 0; border-radius: 6px; background: #2563eb;
+           color: white; cursor: pointer; }
+  button:disabled { background: #475569; cursor: wait; }
+  #status { margin: 20px 0; color: #94a3b8; }
+  #summary { font-size: 22px; font-weight: 600; margin: 20px 0; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: 16px; }
+  .card { background: #1e293b; border-radius: 8px; overflow: hidden; }
+  .card video { width: 100%; display: block; background: black; aspect-ratio: 16 / 9; }
+  .card .body { padding: 12px; }
+  .meta { color: #94a3b8; font-size: 13px; margin-bottom: 6px; word-break: break-all; }
+  .reason { margin: 0; }
+  details { margin-top: 28px; background: #1e293b; border-radius: 8px; padding: 12px 16px; }
+  summary { cursor: pointer; font-weight: 600; }
+  details li { margin: 10px 0; }
+  .tag { display: inline-block; font-size: 12px; font-weight: 700; padding: 1px 6px; border-radius: 4px;
+         margin-right: 6px; }
+  .tag.no { background: #7f1d1d; } .tag.unsure { background: #78350f; }
+  .error { color: #f87171; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Longtail</h1>
+  <p class="sub">Describe a scenario. Every camera is searched, then an AI double-checks each clip.</p>
+  <form id="form">
+    <input id="scenario" value="person close to a moving vehicle" placeholder="e.g. person close to a moving vehicle" required>
+    <button id="run" type="submit">Run</button>
+  </form>
+  <div id="status"></div>
+  <div id="summary"></div>
+  <div id="confirmed" class="grid"></div>
+  <div id="rejected"></div>
+</main>
+<script>
+  // Works whether the page is opened as /app/longtail or /app/longtail/.
+  const base = location.pathname.endsWith("/") ? location.pathname : location.pathname + "/";
+  const $ = (id) => document.getElementById(id);
+
+  function esc(text) {
+    const div = document.createElement("div");
+    div.textContent = text ?? "";
+    return div.innerHTML;
+  }
+
+  function fmtTime(sec) {
+    if (sec == null) return "?";
+    const m = Math.floor(sec / 60), s = (sec % 60).toFixed(1).padStart(4, "0");
+    return `${String(m).padStart(2, "0")}:${s}`;
+  }
+
+  function render(jobId, job) {
+    const hits = job.hits.map((h, i) => ({ ...h, index: i }));
+    const confirmed = hits.filter((h) => h.match === "yes");
+    const rejected = hits.filter((h) => h.match !== "yes");
+    $("summary").textContent = `${hits.length} found -> ${confirmed.length} confirmed`;
+
+    $("confirmed").innerHTML = confirmed.map((h) => `
+      <div class="card">
+        <video src="${base}clip/${jobId}/${h.index}" controls muted autoplay loop playsinline preload="metadata"></video>
+        <div class="body">
+          <div class="meta">${esc(h.camera_id)} · ${fmtTime(h.start_sec)} - ${fmtTime(h.end_sec)}<br>${esc(h.video)}</div>
+          <p class="reason">${esc(h.reason)}</p>
+        </div>
+      </div>`).join("");
+
+    $("rejected").innerHTML = rejected.length ? `
+      <details>
+        <summary>Rejected clips (${rejected.length})</summary>
+        <ul>${rejected.map((h) => `
+          <li><span class="tag ${h.match}">${h.match.toUpperCase()}</span>
+            <span class="meta">${esc(h.camera_id)} · ${fmtTime(h.start_sec)} - ${fmtTime(h.end_sec)} · ${esc(h.video)}</span><br>
+            ${esc(h.reason)}</li>`).join("")}
+        </ul>
+      </details>` : "";
+  }
+
+  async function poll(jobId) {
+    while (true) {
+      await new Promise((r) => setTimeout(r, 2000));
+      const resp = await fetch(`${base}api/jobs/${jobId}`);
+      if (!resp.ok) throw new Error(`Status check failed (${resp.status}).`);
+      const job = await resp.json();
+      if (job.status === "done") return job;
+      if (job.status === "error") throw new Error(job.error);
+    }
+  }
+
+  $("form").addEventListener("submit", async (event) => {
+    event.preventDefault();
+    $("run").disabled = true;
+    $("summary").textContent = "";
+    $("confirmed").innerHTML = "";
+    $("rejected").innerHTML = "";
+    $("status").className = "";
+    $("status").textContent = "Searching... (about 50 seconds)";
+    try {
+      const resp = await fetch(`${base}api/run`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ scenario: $("scenario").value }),
+      });
+      const data = await resp.json();
+      if (!resp.ok) throw new Error(data.detail || `Request failed (${resp.status}).`);
+      const job = await poll(data.job_id);
+      $("status").textContent = "";
+      render(data.job_id, job);
+    } catch (err) {
+      $("status").className = "error";
+      $("status").textContent = err.message;
+    } finally {
+      $("run").disabled = false;
+    }
+  });
+</script>
+</body>
+</html>
