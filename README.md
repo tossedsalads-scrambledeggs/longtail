@@ -34,10 +34,12 @@ python3 longtail.py "person close to a moving vehicle"
 python3 longtail.py --per-camera 5 --out found.jsonl forklift near a pedestrian
 ```
 
-With Weave tracing, use a virtual environment that has `weave` installed:
+With Weave tracing, use a virtual environment that has `weave` installed. The Builders Challenge VM's Python has no bundled pip, so bootstrap it:
 
 ```bash
-python3 -m venv .venv && .venv/bin/pip install weave
+python3 -m venv --without-pip .venv
+curl -sSL https://bootstrap.pypa.io/get-pip.py | .venv/bin/python
+.venv/bin/pip install weave
 .venv/bin/python longtail.py "person close to a moving vehicle"
 ```
 
