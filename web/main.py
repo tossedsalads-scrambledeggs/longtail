@@ -19,7 +19,7 @@ from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel
 from starlette.background import BackgroundTask
 
-from longtail import VSS, enable_weave, find_scenario, judge_clip
+from longtail import VSS, diagnose_misses, enable_weave, find_scenario, judge_clip
 
 logging.getLogger("httpx").setLevel(logging.WARNING)
 
@@ -28,7 +28,7 @@ MAX_JOBS = 20
 STREAM_HEADERS = ("content-length", "content-range", "accept-ranges")
 
 app = FastAPI()
-judge, weave_status = enable_weave(judge_clip)
+judge, diagnose, weave_status = enable_weave(judge_clip, diagnose_misses)
 jobs = OrderedDict()
 jobs_lock = threading.Lock()
 run_lock = threading.Lock()
@@ -42,10 +42,23 @@ def new_vss():
     return vss
 
 
+def public(hit):
+    return {k: v for k, v in hit.items() if k != "source"}
+
+
 def run_job(job_id, scenario):
     job = jobs[job_id]
+
+    def record(event):
+        if event["kind"] == "searched":
+            job["hits"] = event["hits"]
+            return
+        if event["kind"] == "verdict":
+            event = {**event, "hit": public(job["hits"][event["clip"]])}
+        job["events"].append(event)
+
     try:
-        result = find_scenario(new_vss(), scenario, judge)
+        result = find_scenario(new_vss(), scenario, judge, diagnose, on_event=record)
         job.update(status="done", **result)
     except (Exception, SystemExit) as e:
         job.update(status="error", error=str(e)[:300])
@@ -76,7 +89,7 @@ def start_run(req: RunRequest):
         raise HTTPException(409, "Another search is already running. Try again in a minute.")
     job_id = uuid.uuid4().hex[:12]
     with jobs_lock:
-        jobs[job_id] = {"status": "running", "scenario": scenario}
+        jobs[job_id] = {"status": "running", "scenario": scenario, "events": []}
         while len(jobs) > MAX_JOBS:
             jobs.popitem(last=False)
     threading.Thread(target=run_job, args=(job_id, scenario), daemon=True).start()
@@ -88,24 +101,26 @@ def get_job(job_id: str):
     job = jobs.get(job_id)
     if job is None:
         raise HTTPException(404, "Unknown job.")
-    if job["status"] != "done":
-        return job
-    hits = [{k: v for k, v in hit.items() if k != "source"} for hit in job["hits"]]
-    return {
-        "status": "done",
-        "scenario": job["scenario"],
-        "cameras": job["cameras"],
-        "empty_cameras": job["empty_cameras"],
-        "hits": hits,
-    }
+    out = {"status": job["status"], "scenario": job["scenario"], "events": list(job["events"])}
+    if job["status"] == "error":
+        out["error"] = job["error"]
+    if job["status"] == "done":
+        out.update(
+            cameras=job["cameras"],
+            empty_cameras=job["empty_cameras"],
+            hits=[public(hit) for hit in job["hits"]],
+            insight=job["insight"],
+        )
+    return out
 
 
 @app.get("/clip/{job_id}/{index}")
 async def clip(job_id: str, index: int, request: Request):
     job = jobs.get(job_id)
-    if job is None or job["status"] != "done" or not 0 <= index < len(job["hits"]):
+    hits = job.get("hits") if job else None
+    if not hits or not 0 <= index < len(hits):
         raise HTTPException(404, "Unknown clip.")
-    source = job["hits"][index]["source"]
+    source = hits[index]["source"]
     headers = {"Range": request.headers["range"]} if "range" in request.headers else {}
 
     for attempt in range(2):

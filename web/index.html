@@ -30,6 +30,18 @@
          margin-right: 6px; }
   .tag.no { background: #7f1d1d; } .tag.unsure { background: #78350f; }
   .error { color: #f87171; }
+  .log { list-style: none; margin: 0 0 20px; padding: 10px 14px; max-height: 260px; overflow-y: auto;
+         background: #020617; border-radius: 8px; font: 13px/1.6 ui-monospace, monospace; }
+  .log:empty { display: none; }
+  .log .mark { display: inline-block; width: 1.4em; font-weight: 700; }
+  .log .yes .mark { color: #4ade80; } .log .rejected .mark { color: #f87171; }
+  .log .camera, .log .info { color: #94a3b8; }
+  .insight { margin-top: 28px; border: 1px solid #f59e0b; border-radius: 8px; padding: 16px 20px;
+             background: #1c1917; }
+  .insight h2 { margin: 0 0 8px; font-size: 18px; color: #fbbf24; }
+  .insight h3 { margin: 16px 0 6px; font-size: 14px; color: #94a3b8; font-weight: 600; }
+  .insight pre { white-space: pre-wrap; margin: 0; padding: 12px; border-radius: 6px; background: #0f172a;
+                 font: 14px/1.5 ui-monospace, monospace; }
 </style>
 </head>
 <body>
@@ -41,8 +53,10 @@
     <button id="run" type="submit">Run</button>
   </form>
   <div id="status"></div>
+  <ol id="log" class="log"></ol>
   <div id="summary"></div>
   <div id="confirmed" class="grid"></div>
+  <div id="insight"></div>
   <div id="rejected"></div>
 </main>
 <script>
@@ -62,20 +76,46 @@
     return `${String(m).padStart(2, "0")}:${s}`;
   }
 
+  function addCard(jobId, index, h) {
+    if (document.querySelector(`#confirmed [data-index="${index}"]`)) return;
+    $("confirmed").insertAdjacentHTML("beforeend", `
+      <div class="card" data-index="${index}">
+        <video src="${base}clip/${jobId}/${index}" controls muted autoplay loop playsinline preload="metadata"></video>
+        <div class="body">
+          <div class="meta">${esc(h.camera_id)} · ${fmtTime(h.start_sec)} - ${fmtTime(h.end_sec)}<br>${esc(h.video)}</div>
+          <p class="reason">${esc(h.reason)}</p>
+        </div>
+      </div>`);
+  }
+
+  function renderProgress(jobId, job) {
+    const log = $("log");
+    const count = log.children.length;
+    for (const e of job.events.slice(count)) {
+      const cls = e.kind === "verdict" ? (e.match === "yes" ? "yes" : "rejected") : e.kind;
+      const mark = e.kind === "verdict" ? (e.match === "yes" ? "✓" : "✗") : e.kind === "camera" ? "•" : "…";
+      log.insertAdjacentHTML("beforeend", `<li class="${cls}"><span class="mark">${mark}</span>${esc(e.text)}</li>`);
+      if (e.kind === "verdict" && e.match === "yes") addCard(jobId, e.clip, e.hit);
+    }
+    if (job.events.length > count) log.scrollTop = log.scrollHeight;
+  }
+
   function render(jobId, job) {
     const hits = job.hits.map((h, i) => ({ ...h, index: i }));
     const confirmed = hits.filter((h) => h.match === "yes");
     const rejected = hits.filter((h) => h.match !== "yes");
     $("summary").textContent = `${hits.length} found -> ${confirmed.length} confirmed`;
+    confirmed.forEach((h) => addCard(jobId, h.index, h));
 
-    $("confirmed").innerHTML = confirmed.map((h) => `
-      <div class="card">
-        <video src="${base}clip/${jobId}/${h.index}" controls muted autoplay loop playsinline preload="metadata"></video>
-        <div class="body">
-          <div class="meta">${esc(h.camera_id)} · ${fmtTime(h.start_sec)} - ${fmtTime(h.end_sec)}<br>${esc(h.video)}</div>
-          <p class="reason">${esc(h.reason)}</p>
-        </div>
-      </div>`).join("");
+    const insight = job.insight;
+    $("insight").innerHTML = insight ? `
+      <div class="insight">
+        <h2>What your archive can't see</h2>
+        <p>${esc(insight.why_search_missed)}</p>
+        ${insight.suggested_ingest_prompt ? `
+          <h3>Suggested ingest prompt (${insight.suggested_ingest_prompt.length} characters)</h3>
+          <pre>${esc(insight.suggested_ingest_prompt)}</pre>` : ""}
+      </div>` : "";
 
     $("rejected").innerHTML = rejected.length ? `
       <details>
@@ -94,6 +134,7 @@
       const resp = await fetch(`${base}api/jobs/${jobId}`);
       if (!resp.ok) throw new Error(`Status check failed (${resp.status}).`);
       const job = await resp.json();
+      renderProgress(jobId, job);
       if (job.status === "done") return job;
       if (job.status === "error") throw new Error(job.error);
     }
@@ -102,8 +143,10 @@
   $("form").addEventListener("submit", async (event) => {
     event.preventDefault();
     $("run").disabled = true;
+    $("log").innerHTML = "";
     $("summary").textContent = "";
     $("confirmed").innerHTML = "";
+    $("insight").innerHTML = "";
     $("rejected").innerHTML = "";
     $("status").className = "";
     $("status").textContent = "Searching... (about 50 seconds)";
